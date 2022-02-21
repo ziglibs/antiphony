@@ -1,0 +1,3 @@
+[submodule "vendor/s2s"]
+	path = vendor/s2s
+	url = https://github.com/ziglibs/s2s
