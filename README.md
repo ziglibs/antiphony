@@ -8,11 +8,13 @@ A simple Zig remote procedure call library.
 
 - Network agnostic
 - Nested calls
-- Bi-directional calls
-
-## Concepts
-
-The RPC system is bi-directional and can call functions from a client to a host.
-`client` and `host` are arbitrarily chosen words for two endpoints of a connection.
 
 ## API
+
+> Coming soon
+
+## Project Status
+
+**DO NOT USE THIS YET, UNTESTED**
+
+This project is currently in testing phase, all core features are already implemented.
