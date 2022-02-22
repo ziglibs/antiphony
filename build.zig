@@ -12,7 +12,7 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const main_tests = b.addTest("src/main.zig");
+    const main_tests = b.addTest("src/antiphony.zig");
     main_tests.addPackage(pkgs.s2s);
     main_tests.setBuildMode(mode);
 
