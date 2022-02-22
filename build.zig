@@ -12,6 +12,17 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
+    const linux_example = b.addExecutable("socketpair-example", "examples/linux.zig");
+    linux_example.addPackage(.{
+        .name = "antiphony",
+        .path = .{ .path = "src/antiphony.zig" },
+        .dependencies = &.{.{
+            .name = "s2s",
+            .path = .{ .path = "vendor/s2s/s2s.zig" },
+        }},
+    });
+    linux_example.install();
+
     const main_tests = b.addTest("src/antiphony.zig");
     main_tests.addPackage(pkgs.s2s);
     main_tests.setBuildMode(mode);

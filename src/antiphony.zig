@@ -141,6 +141,10 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     const func_info = @typeInfo(FuncPrototype).Fn;
 
                     var arg_list: ArgsTuple = undefined;
+
+                    if (args.len != arg_list.len)
+                        @compileError("Argument mismatch!");
+
                     {
                         comptime var i = 0;
                         inline while (i < arg_list.len) : (i += 1) {
