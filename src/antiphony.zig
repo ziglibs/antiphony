@@ -9,8 +9,27 @@ const current_version = 0;
 pub const Role = enum { host, client };
 
 const CommandId = enum(u8) {
+    /// Begins a function invocation.
+    ///
+    /// message format:
+    /// - sequence id (u32)
+    /// - function name length (u32)
+    /// - function name ([function name length]u8)
+    /// - serialized function arguments
     call = 1,
+
+    /// Returns the data for a function invocation.
+    ///
+    /// message format:
+    /// - sequence id (u32)
+    /// - serialized function return value
     response = 2,
+
+    /// Forces a peer to leave `acceptCalls()`.
+    ///
+    /// message format:
+    /// - (no data)
+    shutdown = 3,
 };
 
 const SequenceID = enum(u32) { _ };
@@ -46,8 +65,15 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 .host => client_spec,
                 .client => host_spec,
             };
+            const InboundSpec = @TypeOf(inbound_spec);
 
-            _ = inbound_spec;
+            const max_received_func_name_len = comptime blk: {
+                var len = 0;
+                for (std.meta.fields(InboundSpec)) |fld| {
+                    len = std.math.max(fld.name.len, len);
+                }
+                break :blk len;
+            };
 
             return struct {
                 pub const Binder = @This();
@@ -57,7 +83,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
 
                 pub const IoError = Reader.Error || Writer.Error || error{EndOfStream};
                 pub const ProtocolError = error{ ProtocolViolation, InvalidProtocol, ProtocolMismatch };
-                const InvokeError = IoError || ProtocolError;
+                const InvokeError = IoError || ProtocolError || std.mem.Allocator.Error;
 
                 allocator: std.mem.Allocator,
                 reader: Reader,
@@ -98,12 +124,13 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 pub fn acceptCalls(self: *Binder) InvokeError!void {
                     while (true) {
                         const cmd_id = try self.reader.readByte();
-                        const cmd = std.meta.intToEnum(CommandId, cmd_id) catch error.ProtocolViolation;
+                        const cmd = std.meta.intToEnum(CommandId, cmd_id) catch return error.ProtocolViolation;
                         switch (cmd) {
                             .call => {
                                 try self.processCall();
                             },
                             .response => return error.ProtocolViolation,
+                            .shutdown => return,
                         }
                     }
                 }
@@ -153,14 +180,68 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                                     return error.ProtocolViolation;
                                 return;
                             },
+                            .shutdown => return error.ProtocolViolation,
                         }
                     }
                 }
 
                 /// Deserializes call information
                 fn processCall(self: *Binder) !void {
-                    _ = self;
-                    @panic("not implemented yet");
+                    const sequence_id = @intToEnum(SequenceID, try self.reader.readIntLittle(u32));
+                    const name_length = try self.reader.readIntLittle(u32);
+                    if (name_length > max_received_func_name_len)
+                        return error.ProtocolViolation;
+                    var name_buffer: [max_received_func_name_len]u8 = undefined;
+                    const function_name = name_buffer[0..name_length];
+                    try self.reader.readNoEof(function_name);
+
+                    inline for (std.meta.fields(InboundSpec)) |fld| {
+                        if (std.mem.eql(u8, fld.name, function_name)) {
+                            try self.processCallTo(fld.name, sequence_id);
+                            return;
+                        }
+                    }
+
+                    // Client invoked unknown function
+                    return error.ProtocolViolation;
+                }
+
+                fn processCallTo(self: *Binder, comptime function_name: []const u8, sequence_id: SequenceID) !void {
+                    const impl_func = @field(Implementation, function_name);
+                    const FuncSpec = @field(inbound_spec, function_name);
+                    const FuncArgs = std.meta.ArgsTuple(FuncSpec);
+
+                    const ImplFunc = @TypeOf(impl_func);
+
+                    const SpecReturnType = @typeInfo(FuncSpec).Fn.return_type.?;
+
+                    const impl_func_info = @typeInfo(ImplFunc);
+                    if (impl_func_info != .Fn)
+                        @compileError(@typeName(Implementation) ++ "." ++ function_name ++ " must be a function with invocable signature " ++ @typeName(FuncSpec));
+
+                    const impl_func_fn = impl_func_info.Fn;
+
+                    var invocation_args: FuncArgs = s2s.deserializeAlloc(self.reader, FuncArgs, self.allocator) catch |err| switch (err) {
+                        error.UnexpectedData => return error.ProtocolViolation,
+                        else => |e| return e,
+                    };
+                    defer s2s.free(self.allocator, FuncArgs, &invocation_args);
+
+                    const result: SpecReturnType = if (impl_func_fn.args.len == invocation_args.len)
+                        // invocation without self
+                        @call(.{}, impl_func, invocation_args)
+                    else if (impl_func_fn.args.len == invocation_args.len + 1)
+                        // invocation with self
+                        if (@typeInfo(impl_func_fn.args[0].arg_type.?) == .Pointer)
+                            @call(.{}, impl_func, .{self.impl.?} ++ invocation_args)
+                        else
+                            @call(.{}, impl_func, .{self.impl.?.*} ++ invocation_args)
+                    else
+                        @compileError("Parameter mismatch for " ++ function_name);
+
+                    try self.writer.writeByte(@enumToInt(CommandId.response));
+                    try self.writer.writeIntLittle(u32, @enumToInt(sequence_id));
+                    try s2s.serialize(self.writer, SpecReturnType, result);
                 }
 
                 fn nextSequenceID(self: *Binder) SequenceID {
@@ -250,6 +331,238 @@ test "invoke function (emulated host)" {
 
     try binder.invoke("some", .{ 1, 2, "hello, world!" });
 
-    std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
-    std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
+    // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
+    // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
+}
+
+test "invoke function (emulated client, no self parameter)" {
+    const RcpDefinition = CreateDefinition(.{
+        .host = .{
+            .some = fn (a: u32, b: f32, c: []const u8) u32,
+        },
+        .client = .{},
+    });
+
+    const HostImpl = struct {
+        fn some(a: u32, b: f32, c: []const u8) u32 {
+            std.debug.print("some({}, {d}, \"{s}\");\n", .{ a, b, c });
+            return a + @floatToInt(u32, b);
+        }
+    };
+
+    var output_stream = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_stream.deinit();
+
+    const input_data = comptime blk: {
+        var buffer: [4096]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        var writer = stream.writer();
+
+        try writer.writeAll(&protocol_magic);
+        try writer.writeByte(current_version);
+
+        try writer.writeByte(@enumToInt(CommandId.call));
+        try writer.writeIntLittle(u32, 1337); // first sequence id
+        try writer.writeIntLittle(u32, "some".len);
+        try writer.writeAll("some");
+
+        try s2s.serialize(writer, std.meta.Tuple(&.{ u32, f32, []const u8 }), .{
+            .@"0" = 1334,
+            .@"1" = std.math.pi,
+            .@"2" = "Hello, Host!",
+        });
+
+        try writer.writeByte(@enumToInt(CommandId.shutdown));
+
+        break :blk stream.getWritten();
+    };
+    var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
+
+    const Binder = RcpDefinition.HostBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, HostImpl);
+
+    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+
+    var impl = HostImpl{};
+    try binder.connect(&impl);
+
+    try binder.acceptCalls();
+
+    // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
+    // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
+}
+
+test "invoke function (emulated client, with self parameter)" {
+    const RcpDefinition = CreateDefinition(.{
+        .host = .{
+            .some = fn (a: u32, b: f32, c: []const u8) u32,
+        },
+        .client = .{},
+    });
+
+    const HostImpl = struct {
+        dummy: u8 = 0,
+
+        fn some(self: @This(), a: u32, b: f32, c: []const u8) u32 {
+            std.debug.print("some({}, {}, {d}, \"{s}\");\n", .{ self.dummy, a, b, c });
+            return a + @floatToInt(u32, b);
+        }
+    };
+
+    var output_stream = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_stream.deinit();
+
+    const input_data = comptime blk: {
+        var buffer: [4096]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        var writer = stream.writer();
+
+        try writer.writeAll(&protocol_magic);
+        try writer.writeByte(current_version);
+
+        try writer.writeByte(@enumToInt(CommandId.call));
+        try writer.writeIntLittle(u32, 1337); // first sequence id
+        try writer.writeIntLittle(u32, "some".len);
+        try writer.writeAll("some");
+
+        try s2s.serialize(writer, std.meta.Tuple(&.{ u32, f32, []const u8 }), .{
+            .@"0" = 1334,
+            .@"1" = std.math.pi,
+            .@"2" = "Hello, Host!",
+        });
+
+        try writer.writeByte(@enumToInt(CommandId.shutdown));
+
+        break :blk stream.getWritten();
+    };
+    var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
+
+    const Binder = RcpDefinition.HostBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, HostImpl);
+
+    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+
+    var impl = HostImpl{ .dummy = 123 };
+    try binder.connect(&impl);
+
+    try binder.acceptCalls();
+
+    // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
+    // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
+}
+
+test "invoke function with callback (emulated host, no self parameter)" {
+    const RcpDefinition = CreateDefinition(.{
+        .host = .{
+            .some = fn (a: u32, b: f32, c: []const u8) void,
+        },
+        .client = .{
+            .callback = fn (msg: []const u8) void,
+        },
+    });
+
+    const ClientImpl = struct {
+        pub fn callback(msg: []const u8) void {
+            std.debug.print("callback(\"{s}\");\n", .{msg});
+        }
+    };
+
+    var output_stream = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_stream.deinit();
+
+    const input_data = comptime blk: {
+        var buffer: [4096]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        var writer = stream.writer();
+
+        try writer.writeAll(&protocol_magic);
+        try writer.writeByte(current_version);
+
+        try writer.writeByte(@enumToInt(CommandId.call));
+        try writer.writeIntLittle(u32, 1337); // first sequence id
+        try writer.writeIntLittle(u32, "callback".len);
+        try writer.writeAll("callback");
+
+        try s2s.serialize(writer, std.meta.Tuple(&.{[]const u8}), .{
+            .@"0" = "Hello, World!",
+        });
+
+        try writer.writeByte(@enumToInt(CommandId.response));
+        try writer.writeIntLittle(u32, 0); // first sequence id
+
+        try s2s.serialize(writer, void, {});
+
+        break :blk stream.getWritten();
+    };
+    var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
+
+    const Binder = RcpDefinition.ClientBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, ClientImpl);
+
+    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+
+    var impl = ClientImpl{};
+    try binder.connect(&impl);
+
+    try binder.invoke("some", .{ 1, 2, "hello, world!" });
+
+    // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
+    // // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
+}
+
+test "invoke function with callback (emulated host, with self parameter)" {
+    const RcpDefinition = CreateDefinition(.{
+        .host = .{
+            .some = fn (a: u32, b: f32, c: []const u8) void,
+        },
+        .client = .{
+            .callback = fn (msg: []const u8) void,
+        },
+    });
+
+    const ClientImpl = struct {
+        dummy: u8 = 0, // required to print pointer
+
+        pub fn callback(self: *@This(), msg: []const u8) void {
+            std.debug.print("callback({*}, \"{s}\");\n", .{ self, msg });
+        }
+    };
+
+    var output_stream = std.ArrayList(u8).init(std.testing.allocator);
+    defer output_stream.deinit();
+
+    const input_data = comptime blk: {
+        var buffer: [4096]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        var writer = stream.writer();
+
+        try writer.writeAll(&protocol_magic);
+        try writer.writeByte(current_version);
+
+        try writer.writeByte(@enumToInt(CommandId.call));
+        try writer.writeIntLittle(u32, 1337); // first sequence id
+        try writer.writeIntLittle(u32, "callback".len);
+        try writer.writeAll("callback");
+
+        try s2s.serialize(writer, std.meta.Tuple(&.{[]const u8}), .{
+            .@"0" = "Hello, World!",
+        });
+
+        try writer.writeByte(@enumToInt(CommandId.response));
+        try writer.writeIntLittle(u32, 0); // first sequence id
+
+        try s2s.serialize(writer, void, {});
+
+        break :blk stream.getWritten();
+    };
+    var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
+
+    const Binder = RcpDefinition.ClientBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, ClientImpl);
+
+    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+
+    var impl = ClientImpl{};
+    try binder.connect(&impl);
+
+    try binder.invoke("some", .{ 1, 2, "hello, world!" });
+
+    // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
+    // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
 }
