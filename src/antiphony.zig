@@ -22,7 +22,7 @@ const CommandId = enum(u8) {
     ///
     /// message format:
     /// - sequence id (u32)
-    /// - serialized function return value
+    /// - serialized InvocationResult(function return value)
     response = 2,
 
     /// Forces a peer to leave `acceptCalls()`.
@@ -395,7 +395,7 @@ test "invoke function (emulated host)" {
         try writer.writeByte(@enumToInt(CommandId.response));
         try writer.writeIntLittle(u32, 0); // first sequence id
 
-        try s2s.serialize(writer, void, {});
+        try s2s.serialize(writer, InvocationResult(void), invocationResult(void, {}));
 
         break :blk stream.getWritten();
     };
@@ -567,7 +567,7 @@ test "invoke function with callback (emulated host, no self parameter)" {
         try writer.writeByte(@enumToInt(CommandId.response));
         try writer.writeIntLittle(u32, 0); // first sequence id
 
-        try s2s.serialize(writer, void, {});
+        try s2s.serialize(writer, InvocationResult(void), invocationResult(void, {}));
 
         break :blk stream.getWritten();
     };
@@ -627,7 +627,7 @@ test "invoke function with callback (emulated host, with self parameter)" {
         try writer.writeByte(@enumToInt(CommandId.response));
         try writer.writeIntLittle(u32, 0); // first sequence id
 
-        try s2s.serialize(writer, void, {});
+        try s2s.serialize(writer, InvocationResult(void), invocationResult(void, {}));
 
         break :blk stream.getWritten();
     };
