@@ -35,7 +35,7 @@ const CommandId = enum(u8) {
 const SequenceID = enum(u32) { _ };
 
 pub const Config = struct {
-    /// If this is set, a call to `Binder.invoke()` will merge the remote error set into
+    /// If this is set, a call to `EndPoint.invoke()` will merge the remote error set into
     /// the error set of `invoke()` itself, so a single `try invoke()` will suffice.
     /// Otherwise, the return type will be`InvokeError!InvocationResult(RemoteResult)`.
     merge_error_sets: bool = true,
@@ -55,15 +55,15 @@ pub fn CreateDefinition(comptime spec: anytype) type {
     return struct {
         const Self = @This();
 
-        pub fn HostBinder(comptime Reader: type, comptime Writer: type, comptime Implementation: type) type {
-            return CreateBinder(.host, Reader, Writer, Implementation);
+        pub fn HostEndPoint(comptime Reader: type, comptime Writer: type, comptime Implementation: type) type {
+            return CreateEndPoint(.host, Reader, Writer, Implementation);
         }
 
-        pub fn ClientBinder(comptime Reader: type, comptime Writer: type, comptime Implementation: type) type {
-            return CreateBinder(.client, Reader, Writer, Implementation);
+        pub fn ClientEndPoint(comptime Reader: type, comptime Writer: type, comptime Implementation: type) type {
+            return CreateEndPoint(.client, Reader, Writer, Implementation);
         }
 
-        pub fn CreateBinder(comptime role: Role, comptime ReaderType: type, comptime WriterType: type, comptime ImplementationType: type) type {
+        pub fn CreateEndPoint(comptime role: Role, comptime ReaderType: type, comptime WriterType: type, comptime ImplementationType: type) type {
             const inbound_spec = switch (role) {
                 .host => host_spec,
                 .client => client_spec,
@@ -83,14 +83,15 @@ pub fn CreateDefinition(comptime spec: anytype) type {
             };
 
             return struct {
-                pub const Binder = @This();
+                const EndPoint = @This();
                 pub const Reader = ReaderType;
                 pub const Writer = WriterType;
                 pub const Implementation = ImplementationType;
 
                 pub const IoError = Reader.Error || Writer.Error || error{EndOfStream};
                 pub const ProtocolError = error{ ProtocolViolation, InvalidProtocol, ProtocolMismatch };
-                const InvokeError = IoError || ProtocolError || std.mem.Allocator.Error;
+                pub const InvokeError = IoError || ProtocolError || std.mem.Allocator.Error;
+                pub const ConnectError = IoError || ProtocolError;
 
                 allocator: std.mem.Allocator,
                 reader: Reader,
@@ -99,24 +100,22 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 sequence_id: u32 = 0,
                 impl: ?*Implementation = null,
 
-                pub fn init(allocator: std.mem.Allocator, reader: Reader, writer: Writer) Binder {
-                    return Binder{
+                pub fn init(allocator: std.mem.Allocator, reader: Reader, writer: Writer) EndPoint {
+                    return EndPoint{
                         .allocator = allocator,
                         .reader = reader,
                         .writer = writer,
                     };
                 }
-                pub fn destroy(self: *Binder) void {
+                pub fn destroy(self: *EndPoint) void {
                     // make sure the other connection is gracefully shut down in any case
                     self.shutdown() catch |err| logger.warn("failed to shut down remote connection gracefully: {s}", .{@errorName(err)});
                     self.* = undefined;
                 }
 
-                const ConnectError = IoError || ProtocolError;
-
                 /// Performs the initial handshake with the remote peer.
                 /// Both agree on the used RPC version and that they use the same protocol.
-                pub fn connect(self: *Binder, impl: *Implementation) !void {
+                pub fn connect(self: *EndPoint, impl: *Implementation) ConnectError!void {
                     try self.writer.writeAll(&protocol_magic);
                     try self.writer.writeByte(current_version); // version byte
 
@@ -133,12 +132,12 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 }
 
                 /// Shuts down the connection and exits the loop inside `acceptCalls()` on the remote peer.
-                pub fn shutdown(self: *Binder) !void {
+                pub fn shutdown(self: *EndPoint) IoError!void {
                     try self.writer.writeByte(@enumToInt(CommandId.shutdown));
                 }
 
                 /// Waits for incoming calls and handles them till the client shuts down the connection.
-                pub fn acceptCalls(self: *Binder) InvokeError!void {
+                pub fn acceptCalls(self: *EndPoint) InvokeError!void {
                     while (true) {
                         const cmd_id = try self.reader.readByte();
                         const cmd = std.meta.intToEnum(CommandId, cmd_id) catch return error.ProtocolViolation;
@@ -175,7 +174,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     }
                 }
 
-                pub fn invoke(self: *Binder, comptime func_name: []const u8, args: anytype) InvokeReturnType(func_name) {
+                pub fn invoke(self: *EndPoint, comptime func_name: []const u8, args: anytype) InvokeReturnType(func_name) {
                     const FuncPrototype = @field(outbound_spec, func_name);
                     const ArgsTuple = std.meta.ArgsTuple(FuncPrototype);
                     const func_info = @typeInfo(FuncPrototype).Fn;
@@ -223,7 +222,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 /// Waits until a response comman is received and validates that against the response id.
                 /// Handles in-between calls to other functions.
                 /// Leaves the reader in a state so the response can be deserialized directly from the stream.
-                fn waitForResponse(self: *Binder, sequence_id: SequenceID) !void {
+                fn waitForResponse(self: *EndPoint, sequence_id: SequenceID) !void {
                     while (true) {
                         const cmd_id = try self.reader.readByte();
                         const cmd = std.meta.intToEnum(CommandId, cmd_id) catch return error.ProtocolViolation;
@@ -243,7 +242,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 }
 
                 /// Deserializes call information
-                fn processCall(self: *Binder) !void {
+                fn processCall(self: *EndPoint) !void {
                     const sequence_id = @intToEnum(SequenceID, try self.reader.readIntLittle(u32));
                     const name_length = try self.reader.readIntLittle(u32);
                     if (name_length > max_received_func_name_len)
@@ -263,7 +262,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     return error.ProtocolViolation;
                 }
 
-                fn processCallTo(self: *Binder, comptime function_name: []const u8, sequence_id: SequenceID) !void {
+                fn processCallTo(self: *EndPoint, comptime function_name: []const u8, sequence_id: SequenceID) !void {
                     const impl_func = @field(Implementation, function_name);
                     const FuncSpec = @field(inbound_spec, function_name);
                     const FuncArgs = std.meta.ArgsTuple(FuncSpec);
@@ -301,7 +300,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     try s2s.serialize(self.writer, InvocationResult(SpecReturnType), invocationResult(SpecReturnType, result));
                 }
 
-                fn nextSequenceID(self: *Binder) SequenceID {
+                fn nextSequenceID(self: *EndPoint) SequenceID {
                     const next = self.sequence_id;
                     self.sequence_id += 1;
                     return @intToEnum(SequenceID, next);
@@ -401,14 +400,14 @@ test "invoke function (emulated host)" {
     };
     var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
 
-    const Binder = RcpDefinition.ClientBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, ClientImpl);
+    const EndPoint = RcpDefinition.ClientEndPoint(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, ClientImpl);
 
-    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+    var end_point = EndPoint.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
 
     var impl = ClientImpl{};
-    try binder.connect(&impl);
+    try end_point.connect(&impl);
 
-    try binder.invoke("some", .{ 1, 2, "hello, world!" });
+    try end_point.invoke("some", .{ 1, 2, "hello, world!" });
 
     // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
     // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
@@ -457,14 +456,14 @@ test "invoke function (emulated client, no self parameter)" {
     };
     var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
 
-    const Binder = RcpDefinition.HostBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, HostImpl);
+    const EndPoint = RcpDefinition.HostEndPoint(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, HostImpl);
 
-    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+    var end_point = EndPoint.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
 
     var impl = HostImpl{};
-    try binder.connect(&impl);
+    try end_point.connect(&impl);
 
-    try binder.acceptCalls();
+    try end_point.acceptCalls();
 
     // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
     // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
@@ -515,14 +514,14 @@ test "invoke function (emulated client, with self parameter)" {
     };
     var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
 
-    const Binder = RcpDefinition.HostBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, HostImpl);
+    const EndPoint = RcpDefinition.HostEndPoint(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, HostImpl);
 
-    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+    var end_point = EndPoint.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
 
     var impl = HostImpl{ .dummy = 123 };
-    try binder.connect(&impl);
+    try end_point.connect(&impl);
 
-    try binder.acceptCalls();
+    try end_point.acceptCalls();
 
     // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
     // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
@@ -573,14 +572,14 @@ test "invoke function with callback (emulated host, no self parameter)" {
     };
     var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
 
-    const Binder = RcpDefinition.ClientBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, ClientImpl);
+    const EndPoint = RcpDefinition.ClientEndPoint(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, ClientImpl);
 
-    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+    var end_point = EndPoint.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
 
     var impl = ClientImpl{};
-    try binder.connect(&impl);
+    try end_point.connect(&impl);
 
-    try binder.invoke("some", .{ 1, 2, "hello, world!" });
+    try end_point.invoke("some", .{ 1, 2, "hello, world!" });
 
     // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
     // // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});
@@ -633,14 +632,14 @@ test "invoke function with callback (emulated host, with self parameter)" {
     };
     var input_stream = std.io.fixedBufferStream(@as([]const u8, input_data));
 
-    const Binder = RcpDefinition.ClientBinder(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, ClientImpl);
+    const EndPoint = RcpDefinition.ClientEndPoint(std.io.FixedBufferStream([]const u8).Reader, std.ArrayList(u8).Writer, ClientImpl);
 
-    var binder = Binder.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
+    var end_point = EndPoint.init(std.testing.allocator, input_stream.reader(), output_stream.writer());
 
     var impl = ClientImpl{};
-    try binder.connect(&impl);
+    try end_point.connect(&impl);
 
-    try binder.invoke("some", .{ 1, 2, "hello, world!" });
+    try end_point.invoke("some", .{ 1, 2, "hello, world!" });
 
     // std.debug.print("host to client: {}\n", .{std.fmt.fmtSliceHexUpper(input_data)});
     // std.debug.print("client to host: {}\n", .{std.fmt.fmtSliceHexUpper(output_stream.items)});

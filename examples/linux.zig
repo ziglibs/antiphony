@@ -46,28 +46,28 @@ fn clientImplementation(file: std.fs.File) !void {
         }
     };
 
-    const Binder = RcpDefinition.ClientBinder(std.fs.File.Reader, std.fs.File.Writer, ClientImpl);
+    const EndPoint = RcpDefinition.ClientEndPoint(std.fs.File.Reader, std.fs.File.Writer, ClientImpl);
 
-    var binder = Binder.init(
+    var end_point = EndPoint.init(
         gpa.allocator(),
         file.reader(),
         file.writer(),
     );
-    defer binder.destroy();
+    defer end_point.destroy();
 
     var impl = ClientImpl{};
-    try binder.connect(&impl); // establish RPC handshake
+    try end_point.connect(&impl); // establish RPC handshake
 
-    const handle = try binder.invoke("createCounter", .{});
+    const handle = try end_point.invoke("createCounter", .{});
 
-    std.log.info("first increment:  {}", .{try binder.invoke("increment", .{ handle, 5 })});
-    std.log.info("second increment: {}", .{try binder.invoke("increment", .{ handle, 3 })});
-    std.log.info("third increment:  {}", .{try binder.invoke("increment", .{ handle, 7 })});
-    std.log.info("final count:      {}", .{try binder.invoke("getCount", .{handle})});
+    std.log.info("first increment:  {}", .{try end_point.invoke("increment", .{ handle, 5 })});
+    std.log.info("second increment: {}", .{try end_point.invoke("increment", .{ handle, 3 })});
+    std.log.info("third increment:  {}", .{try end_point.invoke("increment", .{ handle, 7 })});
+    std.log.info("final count:      {}", .{try end_point.invoke("getCount", .{handle})});
 
-    try binder.invoke("destroyCounter", .{handle});
+    try end_point.invoke("destroyCounter", .{handle});
 
-    _ = binder.invoke("getCount", .{handle}) catch |err| std.log.info("error while calling getCount()  with invalid handle: {s}", .{@errorName(err)});
+    _ = end_point.invoke("getCount", .{handle}) catch |err| std.log.info("error while calling getCount()  with invalid handle: {s}", .{@errorName(err)});
 }
 
 fn hostImplementation(file: std.fs.File) !void {
@@ -77,7 +77,14 @@ fn hostImplementation(file: std.fs.File) !void {
     const HostImpl = struct {
         const Self = @This();
 
+        const EndPoint = RcpDefinition.HostEndPoint(std.fs.File.Reader, std.fs.File.Writer, Self);
+
         counters: std.ArrayList(?u32),
+        end_point: *EndPoint,
+
+        fn sendErrorMessage(self: Self, msg: []const u8) void {
+            self.end_point.invoke("signalError", .{msg}) catch |err| std.log.err("failed to send error message: {s}", .{@errorName(err)});
+        }
 
         pub fn createCounter(self: *Self) CreateError!u32 {
             const index = @truncate(u32, self.counters.items.len);
@@ -85,47 +92,54 @@ fn hostImplementation(file: std.fs.File) !void {
             return index;
         }
         pub fn destroyCounter(self: *Self, handle: u32) void {
-            if (handle >= self.counters.items.len)
+            if (handle >= self.counters.items.len) {
+                self.sendErrorMessage("unknown counter");
                 return;
+            }
             self.counters.items[handle] = null;
         }
         pub fn increment(self: *Self, handle: u32, count: u32) UsageError!u32 {
-            if (handle >= self.counters.items.len)
+            if (handle >= self.counters.items.len) {
+                self.sendErrorMessage("This counter does not exist!");
                 return error.UnknownCounter;
+            }
             if (self.counters.items[handle]) |*counter| {
                 const previous = counter.*;
                 counter.* +%= count;
                 return previous;
             } else {
+                self.sendErrorMessage("This counter was already deleted!");
                 return error.UnknownCounter;
             }
         }
         pub fn getCount(self: *Self, handle: u32) UsageError!u32 {
-            if (handle >= self.counters.items.len)
+            if (handle >= self.counters.items.len) {
+                self.sendErrorMessage("This counter does not exist!");
                 return error.UnknownCounter;
+            }
             if (self.counters.items[handle]) |value| {
                 return value;
             } else {
+                self.sendErrorMessage("This counter was already deleted!");
                 return error.UnknownCounter;
             }
         }
     };
 
-    var impl = HostImpl{
-        .counters = std.ArrayList(?u32).init(gpa.allocator()),
-    };
-    defer impl.counters.deinit();
-
-    const HostBinder = RcpDefinition.HostBinder(std.fs.File.Reader, std.fs.File.Writer, HostImpl);
-
-    var binder = HostBinder.init(
+    var end_point = HostImpl.EndPoint.init(
         gpa.allocator(), // we need some basic session management
         file.reader(), // data input
         file.writer(), // data output
     );
-    defer binder.destroy();
+    defer end_point.destroy();
 
-    try binder.connect(&impl); // establish RPC handshake
+    var impl = HostImpl{
+        .counters = std.ArrayList(?u32).init(gpa.allocator()),
+        .end_point = &end_point,
+    };
+    defer impl.counters.deinit();
 
-    try binder.acceptCalls(); // blocks until client exits.
+    try end_point.connect(&impl); // establish RPC handshake
+
+    try end_point.acceptCalls(); // blocks until client exits.
 }
