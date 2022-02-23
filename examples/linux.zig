@@ -58,7 +58,7 @@ fn clientImplementation(file: std.fs.File) !void {
     var impl = ClientImpl{};
     try binder.connect(&impl); // establish RPC handshake
 
-    const handle = try try binder.invoke("createCounter", .{});
+    const handle = try binder.invoke("createCounter", .{});
 
     std.log.info("first increment:  {}", .{try binder.invoke("increment", .{ handle, 5 })});
     std.log.info("second increment: {}", .{try binder.invoke("increment", .{ handle, 3 })});
@@ -66,6 +66,8 @@ fn clientImplementation(file: std.fs.File) !void {
     std.log.info("final count:      {}", .{try binder.invoke("getCount", .{handle})});
 
     try binder.invoke("destroyCounter", .{handle});
+
+    _ = binder.invoke("getCount", .{handle}) catch |err| std.log.info("error while calling getCount()  with invalid handle: {s}", .{@errorName(err)});
 }
 
 fn hostImplementation(file: std.fs.File) !void {

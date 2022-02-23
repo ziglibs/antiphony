@@ -34,13 +34,20 @@ const CommandId = enum(u8) {
 
 const SequenceID = enum(u32) { _ };
 
-fn ReturnType(comptime Func: type) type {
-    return @typeInfo(Func).Fn.return_type.?;
-}
+pub const Config = struct {
+    /// If this is set, a call to `Binder.invoke()` will merge the remote error set into
+    /// the error set of `invoke()` itself, so a single `try invoke()` will suffice.
+    /// Otherwise, the return type will be`InvokeError!InvocationResult(RemoteResult)`.
+    merge_error_sets: bool = true,
+};
 
 pub fn CreateDefinition(comptime spec: anytype) type {
     const host_spec = spec.host;
     const client_spec = spec.client;
+    const config: Config = if (@hasField(@TypeOf(spec), "config"))
+        spec.config
+    else
+        Config{};
 
     comptime validateSpec(host_spec);
     comptime validateSpec(client_spec);
@@ -100,10 +107,15 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     };
                 }
                 pub fn destroy(self: *Binder) void {
+                    // make sure the other connection is gracefully shut down in any case
+                    self.shutdown() catch |err| logger.warn("failed to shut down remote connection gracefully: {s}", .{@errorName(err)});
                     self.* = undefined;
                 }
 
                 const ConnectError = IoError || ProtocolError;
+
+                /// Performs the initial handshake with the remote peer.
+                /// Both agree on the used RPC version and that they use the same protocol.
                 pub fn connect(self: *Binder, impl: *Implementation) !void {
                     try self.writer.writeAll(&protocol_magic);
                     try self.writer.writeByte(current_version); // version byte
@@ -120,7 +132,12 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     self.impl = impl;
                 }
 
-                /// Waits for incoming calls and handles them till the client closes the connection.
+                /// Shuts down the connection and exits the loop inside `acceptCalls()` on the remote peer.
+                pub fn shutdown(self: *Binder) !void {
+                    try self.writer.writeByte(@enumToInt(CommandId.shutdown));
+                }
+
+                /// Waits for incoming calls and handles them till the client shuts down the connection.
                 pub fn acceptCalls(self: *Binder) InvokeError!void {
                     while (true) {
                         const cmd_id = try self.reader.readByte();
@@ -135,7 +152,30 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     }
                 }
 
-                pub fn invoke(self: *Binder, comptime func_name: []const u8, args: anytype) InvokeError!ReturnType(@field(outbound_spec, func_name)) {
+                fn InvokeReturnType(comptime func_name: []const u8) type {
+                    const FuncPrototype = @field(outbound_spec, func_name);
+                    const func_info = @typeInfo(FuncPrototype).Fn;
+                    const FuncReturnType = func_info.return_type.?;
+
+                    if (config.merge_error_sets) {
+                        switch (@typeInfo(FuncReturnType)) {
+                            // We merge error sets, but still return the original function payload
+                            .ErrorUnion => |eu| return (InvokeError || eu.error_set)!eu.payload,
+
+                            // we just merge error sets, the result will be `void` in *no* case (but makes handling easier)
+                            .ErrorSet => return (InvokeError || FuncReturnType)!void,
+
+                            // The function doesn't return an error, so we just return InvokeError *or* the function return value.
+                            else => return InvokeError!FuncReturnType,
+                        }
+                    } else {
+                        // When not merging error sets, we need to wrap the result into a InvocationResult to handle potential
+                        // error unions or sets gracefully in the API.
+                        return InvokeError!InvocationResult(FuncReturnType);
+                    }
+                }
+
+                pub fn invoke(self: *Binder, comptime func_name: []const u8, args: anytype) InvokeReturnType(func_name) {
                     const FuncPrototype = @field(outbound_spec, func_name);
                     const ArgsTuple = std.meta.ArgsTuple(FuncPrototype);
                     const func_info = @typeInfo(FuncPrototype).Fn;
@@ -162,9 +202,22 @@ pub fn CreateDefinition(comptime spec: anytype) type {
 
                     try self.waitForResponse(sequence_id);
 
-                    const result = s2s.deserialize(self.reader, func_info.return_type.?) catch return error.ProtocolViolation;
+                    const FuncReturnType = func_info.return_type.?;
 
-                    return result;
+                    const result = s2s.deserialize(self.reader, InvocationResult(FuncReturnType)) catch return error.ProtocolViolation;
+
+                    if (config.merge_error_sets) {
+                        if (@typeInfo(FuncReturnType) == .ErrorUnion) {
+                            return try result.unwrap();
+                        } else if (@typeInfo(FuncReturnType) == .ErrorSet) {
+                            return result.unwrap();
+                        } else {
+                            return result.unwrap();
+                        }
+                    } else {
+                        // when we don't merge error sets, we have to return the wrapper struct itself.
+                        return result;
+                    }
                 }
 
                 /// Waits until a response comman is received and validates that against the response id.
@@ -245,7 +298,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
 
                     try self.writer.writeByte(@enumToInt(CommandId.response));
                     try self.writer.writeIntLittle(u32, @enumToInt(sequence_id));
-                    try s2s.serialize(self.writer, SpecReturnType, result);
+                    try s2s.serialize(self.writer, InvocationResult(SpecReturnType), invocationResult(SpecReturnType, result));
                 }
 
                 fn nextSequenceID(self: *Binder) SequenceID {
@@ -256,6 +309,28 @@ pub fn CreateDefinition(comptime spec: anytype) type {
             };
         }
     };
+}
+
+/// Computes the return type of the given function type.
+fn ReturnType(comptime Func: type) type {
+    return @typeInfo(Func).Fn.return_type.?;
+}
+
+/// Returns a wrapper struct that contains the result of a function invocation.
+/// This is needed as s2s cannot serialize raw top level errors.
+pub fn InvocationResult(comptime T: type) type {
+    return struct {
+        value: T,
+
+        fn unwrap(self: @This()) T {
+            return self.value;
+        }
+    };
+}
+
+/// Constructor for InvocationResult
+fn invocationResult(comptime T: type, value: T) InvocationResult(T) {
+    return .{ .value = value };
 }
 
 fn validateSpec(comptime funcs: anytype) void {
