@@ -2,6 +2,8 @@ const std = @import("std");
 const s2s = @import("s2s");
 const logger = std.log.scoped(.antiphony_rpc);
 
+/// The role of an EndPoint. `host` and `client` are arbitrary names that define both ends.
+/// The `host` role usually calls `EndPoint.acceptCalls()` and waits for incoming calls.
 pub const Role = enum { host, client };
 
 pub const Config = struct {
