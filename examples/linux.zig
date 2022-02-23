@@ -4,6 +4,7 @@ const rpc = @import("antiphony");
 const CreateError = error{ OutOfMemory, UnknownCounter };
 const UsageError = error{ OutOfMemory, UnknownCounter };
 
+// Define our RPC service via function signatures.
 const RcpDefinition = rpc.CreateDefinition(.{
     .host = .{
         .createCounter = fn () CreateError!u32,
@@ -15,26 +16,6 @@ const RcpDefinition = rpc.CreateDefinition(.{
         .signalError = fn (msg: []const u8) void,
     },
 });
-
-pub fn main() !void {
-    var sockets: [2]i32 = undefined;
-    if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &sockets) != 0)
-        return error.SocketPairError;
-
-    var socket_a = std.fs.File{ .handle = sockets[0] };
-    defer socket_a.close();
-
-    var socket_b = std.fs.File{ .handle = sockets[1] };
-    defer socket_b.close();
-
-    {
-        var client_thread = try std.Thread.spawn(.{}, clientImplementation, .{socket_a});
-        defer client_thread.join();
-
-        var host_thread = try std.Thread.spawn(.{}, hostImplementation, .{socket_b});
-        defer host_thread.join();
-    }
-}
 
 fn clientImplementation(file: std.fs.File) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -142,4 +123,25 @@ fn hostImplementation(file: std.fs.File) !void {
     try end_point.connect(&impl); // establish RPC handshake
 
     try end_point.acceptCalls(); // blocks until client exits.
+}
+
+// This main function just creates a socket pair and hands them off to two threads that perform some RPC calls.
+pub fn main() !void {
+    var sockets: [2]i32 = undefined;
+    if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &sockets) != 0)
+        return error.SocketPairError;
+
+    var socket_a = std.fs.File{ .handle = sockets[0] };
+    defer socket_a.close();
+
+    var socket_b = std.fs.File{ .handle = sockets[1] };
+    defer socket_b.close();
+
+    {
+        var client_thread = try std.Thread.spawn(.{}, clientImplementation, .{socket_a});
+        defer client_thread.join();
+
+        var host_thread = try std.Thread.spawn(.{}, hostImplementation, .{socket_b});
+        defer host_thread.join();
+    }
 }

@@ -1,38 +1,8 @@
 const std = @import("std");
 const s2s = @import("s2s");
-
 const logger = std.log.scoped(.antiphony_rpc);
 
-const protocol_magic = [4]u8{ 0x34, 0xa3, 0x8a, 0x54 };
-const current_version = 0;
-
 pub const Role = enum { host, client };
-
-const CommandId = enum(u8) {
-    /// Begins a function invocation.
-    ///
-    /// message format:
-    /// - sequence id (u32)
-    /// - function name length (u32)
-    /// - function name ([function name length]u8)
-    /// - serialized function arguments
-    call = 1,
-
-    /// Returns the data for a function invocation.
-    ///
-    /// message format:
-    /// - sequence id (u32)
-    /// - serialized InvocationResult(function return value)
-    response = 2,
-
-    /// Forces a peer to leave `acceptCalls()`.
-    ///
-    /// message format:
-    /// - (no data)
-    shutdown = 3,
-};
-
-const SequenceID = enum(u32) { _ };
 
 pub const Config = struct {
     /// If this is set, a call to `EndPoint.invoke()` will merge the remote error set into
@@ -41,6 +11,19 @@ pub const Config = struct {
     merge_error_sets: bool = true,
 };
 
+/// Returns a wrapper struct that contains the result of a function invocation.
+/// This is needed as s2s cannot serialize raw top level errors.
+pub fn InvocationResult(comptime T: type) type {
+    return struct {
+        value: T,
+
+        fn unwrap(self: @This()) T {
+            return self.value;
+        }
+    };
+}
+
+/// Create a new RPC definition that can be used to instantiate end points.
 pub fn CreateDefinition(comptime spec: anytype) type {
     const host_spec = spec.host;
     const client_spec = spec.client;
@@ -116,6 +99,8 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 /// Performs the initial handshake with the remote peer.
                 /// Both agree on the used RPC version and that they use the same protocol.
                 pub fn connect(self: *EndPoint, impl: *Implementation) ConnectError!void {
+                    std.debug.assert(self.impl == null); // do not call twice
+
                     try self.writer.writeAll(&protocol_magic);
                     try self.writer.writeByte(current_version); // version byte
 
@@ -132,12 +117,18 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 }
 
                 /// Shuts down the connection and exits the loop inside `acceptCalls()` on the remote peer.
+                ///
+                /// Must be called only after a successful call to `connect()`.
                 pub fn shutdown(self: *EndPoint) IoError!void {
+                    std.debug.assert(self.impl != null); // call these only after a successful connection!
                     try self.writer.writeByte(@enumToInt(CommandId.shutdown));
                 }
 
                 /// Waits for incoming calls and handles them till the client shuts down the connection.
+                ///
+                /// Must be called only after a successful call to `connect()`.
                 pub fn acceptCalls(self: *EndPoint) InvokeError!void {
+                    std.debug.assert(self.impl != null); // call these only after a successful connection!
                     while (true) {
                         const cmd_id = try self.reader.readByte();
                         const cmd = std.meta.intToEnum(CommandId, cmd_id) catch return error.ProtocolViolation;
@@ -174,7 +165,11 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     }
                 }
 
+                /// Invokes `func_name` on the remote peer with `args`. Returns either an error or the return value of the remote procedure call.
+                /// 
+                /// Must be called only after a successful call to `connect()`.
                 pub fn invoke(self: *EndPoint, comptime func_name: []const u8, args: anytype) InvokeReturnType(func_name) {
+                    std.debug.assert(self.impl != null); // call these only after a successful connection!
                     const FuncPrototype = @field(outbound_spec, func_name);
                     const ArgsTuple = std.meta.ArgsTuple(FuncPrototype);
                     const func_info = @typeInfo(FuncPrototype).Fn;
@@ -310,21 +305,38 @@ pub fn CreateDefinition(comptime spec: anytype) type {
     };
 }
 
+const protocol_magic = [4]u8{ 0x34, 0xa3, 0x8a, 0x54 };
+const current_version = 0;
+
+const CommandId = enum(u8) {
+    /// Begins a function invocation.
+    ///
+    /// message format:
+    /// - sequence id (u32)
+    /// - function name length (u32)
+    /// - function name ([function name length]u8)
+    /// - serialized function arguments
+    call = 1,
+
+    /// Returns the data for a function invocation.
+    ///
+    /// message format:
+    /// - sequence id (u32)
+    /// - serialized InvocationResult(function return value)
+    response = 2,
+
+    /// Forces a peer to leave `acceptCalls()`.
+    ///
+    /// message format:
+    /// - (no data)
+    shutdown = 3,
+};
+
+const SequenceID = enum(u32) { _ };
+
 /// Computes the return type of the given function type.
 fn ReturnType(comptime Func: type) type {
     return @typeInfo(Func).Fn.return_type.?;
-}
-
-/// Returns a wrapper struct that contains the result of a function invocation.
-/// This is needed as s2s cannot serialize raw top level errors.
-pub fn InvocationResult(comptime T: type) type {
-    return struct {
-        value: T,
-
-        fn unwrap(self: @This()) T {
-            return self.value;
-        }
-    };
 }
 
 /// Constructor for InvocationResult
