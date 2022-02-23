@@ -74,7 +74,7 @@ const Definition = antiphony.CreateDefinition(.{
 
 **DO NOT USE THIS YET, UNTESTED**
 
-This project is currently in testing phase, all core features are already implemented.
+This project is currently in testing phase, all core features are already implemented and functional.
 
 ## Contribution
 
