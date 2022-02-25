@@ -94,7 +94,9 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 }
                 pub fn destroy(self: *EndPoint) void {
                     // make sure the other connection is gracefully shut down in any case
-                    self.shutdown() catch |err| logger.warn("failed to shut down remote connection gracefully: {s}", .{@errorName(err)});
+                    if (self.impl != null) {
+                        self.shutdown() catch |err| logger.warn("failed to shut down remote connection gracefully: {s}", .{@errorName(err)});
+                    }
                     self.* = undefined;
                 }
 
