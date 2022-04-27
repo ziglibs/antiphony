@@ -146,7 +146,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     }
                 }
 
-                fn InvokeReturnType(comptime func_name: []const u8) type {
+                pub fn InvokeReturnType(comptime func_name: []const u8) type {
                     const FuncPrototype = @field(outbound_spec, func_name);
                     const func_info = @typeInfo(FuncPrototype).Fn;
                     const FuncReturnType = func_info.return_type.?;
@@ -170,9 +170,23 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 }
 
                 /// Invokes `func_name` on the remote peer with `args`. Returns either an error or the return value of the remote procedure call.
-                /// 
+                ///
                 /// Must be called only after a successful call to `connect()`.
                 pub fn invoke(self: *EndPoint, comptime func_name: []const u8, args: anytype) InvokeReturnType(func_name) {
+                    return try self.invokeInternal(false, {}, func_name, args);
+                }
+
+                /// Invokes `func_name` on the remote peer with `args`. Returns either an error or the return value of the remote procedure call.
+                ///
+                /// Must be called only after a successful call to `connect()`.
+                pub fn invokeAlloc(self: *EndPoint, allocator: std.mem.Allocator, comptime func_name: []const u8, args: anytype) InvokeReturnType(func_name) {
+                    return try self.invokeInternal(true, allocator, func_name, args);
+                }
+
+                /// Frees the result of `invokeAlloc`.
+                pub const free = s2s.free;
+
+                fn invokeInternal(self: *EndPoint, comptime has_alloc: bool, allocator: if (has_alloc) std.mem.Allocator else void, comptime func_name: []const u8, args: anytype) !InvokeReturnType(func_name) {
                     std.debug.assert(self.impl != null); // call these only after a successful connection!
                     const FuncPrototype = @field(outbound_spec, func_name);
                     const ArgsTuple = std.meta.ArgsTuple(FuncPrototype);
@@ -202,19 +216,37 @@ pub fn CreateDefinition(comptime spec: anytype) type {
 
                     const FuncReturnType = func_info.return_type.?;
 
-                    const result = s2s.deserialize(self.reader, InvocationResult(FuncReturnType)) catch return error.ProtocolViolation;
+                    if (has_alloc) {
+                        var result = s2s.deserializeAlloc(self.reader, InvocationResult(FuncReturnType), allocator) catch return error.ProtocolViolation;
+                        errdefer s2s.free(allocator, InvocationResult(FuncReturnType), &result);
 
-                    if (config.merge_error_sets) {
-                        if (@typeInfo(FuncReturnType) == .ErrorUnion) {
-                            return try result.unwrap();
-                        } else if (@typeInfo(FuncReturnType) == .ErrorSet) {
-                            return result.unwrap();
+                        if (config.merge_error_sets) {
+                            if (@typeInfo(FuncReturnType) == .ErrorUnion) {
+                                return try result.unwrap();
+                            } else if (@typeInfo(FuncReturnType) == .ErrorSet) {
+                                return result.unwrap();
+                            } else {
+                                return result.unwrap();
+                            }
                         } else {
-                            return result.unwrap();
+                            // when we don't merge error sets, we have to return the wrapper struct itself.
+                            return result;
                         }
                     } else {
-                        // when we don't merge error sets, we have to return the wrapper struct itself.
-                        return result;
+                        const result = s2s.deserialize(self.reader, InvocationResult(FuncReturnType)) catch return error.ProtocolViolation;
+
+                        if (config.merge_error_sets) {
+                            if (@typeInfo(FuncReturnType) == .ErrorUnion) {
+                                return try result.unwrap();
+                            } else if (@typeInfo(FuncReturnType) == .ErrorSet) {
+                                return result.unwrap();
+                            } else {
+                                return result.unwrap();
+                            }
+                        } else {
+                            // when we don't merge error sets, we have to return the wrapper struct itself.
+                            return result;
+                        }
                     }
                 }
 
