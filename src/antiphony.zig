@@ -25,6 +25,15 @@ pub fn InvocationResult(comptime T: type) type {
     };
 }
 
+/// Use this instead of the usual `Self` parameter when you need to return slices
+pub fn AllocatingCall(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        allocator: std.mem.Allocator,
+        value: T,
+    };
+}
+
 /// Create a new RPC definition that can be used to instantiate end points.
 pub fn CreateDefinition(comptime spec: anytype) type {
     const host_spec = spec.host;
@@ -314,17 +323,33 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     };
                     defer s2s.free(self.allocator, FuncArgs, &invocation_args);
 
+                    // We use the arena for allocating calls, so we don't leak return values
+                    var arena = std.heap.ArenaAllocator.init(self.allocator);
+                    defer arena.deinit();
+
                     const result: SpecReturnType = if (impl_func_fn.args.len == invocation_args.len)
                         // invocation without self
                         @call(.{}, impl_func, invocation_args)
-                    else if (impl_func_fn.args.len == invocation_args.len + 1)
+                    else if (impl_func_fn.args.len == invocation_args.len + 1) blk: {
+                        const Arg0Type = impl_func_fn.args[0].arg_type.?;
+
+                        // invocation with self and allocation
+                        break :blk if (Arg0Type == AllocatingCall(Implementation)) b: {
+                            const proxy = AllocatingCall(Implementation){ .value = self.impl.?.*, .allocator = arena.allocator() };
+                            break :b @call(.{}, impl_func, .{proxy} ++ invocation_args);
+                        } else if (Arg0Type == AllocatingCall(*Implementation)) b: {
+                            const proxy = AllocatingCall(*Implementation){ .value = self.impl.?, .allocator = arena.allocator() };
+                            break :b @call(.{}, impl_func, .{proxy} ++ invocation_args);
+                        } else if (Arg0Type == AllocatingCall(*const Implementation)) b: {
+                            const proxy = AllocatingCall(*const Implementation){ .value = self.impl.?, .allocator = arena.allocator() };
+                            break :b @call(.{}, impl_func, .{proxy} ++ invocation_args);
+                        }
                         // invocation with self
-                        if (@typeInfo(impl_func_fn.args[0].arg_type.?) == .Pointer)
+                        else if (@typeInfo(Arg0Type) == .Pointer)
                             @call(.{}, impl_func, .{self.impl.?} ++ invocation_args)
                         else
-                            @call(.{}, impl_func, .{self.impl.?.*} ++ invocation_args)
-                    else
-                        @compileError("Parameter mismatch for " ++ function_name);
+                            @call(.{}, impl_func, .{self.impl.?.*} ++ invocation_args);
+                    } else @compileError("Parameter mismatch for " ++ function_name);
 
                     try self.writer.writeByte(@enumToInt(CommandId.response));
                     try self.writer.writeIntLittle(u32, @enumToInt(sequence_id));
