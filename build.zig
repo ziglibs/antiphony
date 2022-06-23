@@ -3,7 +3,7 @@ const std = @import("std");
 const pkgs = struct {
     const s2s = std.build.Pkg{
         .name = "s2s",
-        .path = .{ .path = "vendor/s2s/s2s.zig" },
+        .source = .{ .path = "vendor/s2s/s2s.zig" },
     };
 };
 
@@ -15,11 +15,8 @@ pub fn build(b: *std.build.Builder) void {
     const linux_example = b.addExecutable("socketpair-example", "examples/linux.zig");
     linux_example.addPackage(.{
         .name = "antiphony",
-        .path = .{ .path = "src/antiphony.zig" },
-        .dependencies = &.{.{
-            .name = "s2s",
-            .path = .{ .path = "vendor/s2s/s2s.zig" },
-        }},
+        .source = .{ .path = "src/antiphony.zig" },
+        .dependencies = &.{pkgs.s2s},
     });
     linux_example.install();
 
