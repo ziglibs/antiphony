@@ -327,28 +327,28 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                     var arena = std.heap.ArenaAllocator.init(self.allocator);
                     defer arena.deinit();
 
-                    const result: SpecReturnType = if (impl_func_fn.args.len == invocation_args.len)
+                    const result: SpecReturnType = if (impl_func_fn.params.len == invocation_args.len)
                         // invocation without self
-                        @call(.{}, impl_func, invocation_args)
-                    else if (impl_func_fn.args.len == invocation_args.len + 1) blk: {
-                        const Arg0Type = impl_func_fn.args[0].arg_type.?;
+                        @call(.auto, impl_func, invocation_args)
+                    else if (impl_func_fn.params.len == invocation_args.len + 1) blk: {
+                        const Arg0Type = impl_func_fn.params[0].type.?;
 
                         // invocation with self and allocation
                         break :blk if (Arg0Type == AllocatingCall(Implementation)) b: {
                             const proxy = AllocatingCall(Implementation){ .value = self.impl.?.*, .allocator = arena.allocator() };
-                            break :b @call(.{}, impl_func, .{proxy} ++ invocation_args);
+                            break :b @call(.auto, impl_func, .{proxy} ++ invocation_args);
                         } else if (Arg0Type == AllocatingCall(*Implementation)) b: {
                             const proxy = AllocatingCall(*Implementation){ .value = self.impl.?, .allocator = arena.allocator() };
-                            break :b @call(.{}, impl_func, .{proxy} ++ invocation_args);
+                            break :b @call(.auto, impl_func, .{proxy} ++ invocation_args);
                         } else if (Arg0Type == AllocatingCall(*const Implementation)) b: {
                             const proxy = AllocatingCall(*const Implementation){ .value = self.impl.?, .allocator = arena.allocator() };
-                            break :b @call(.{}, impl_func, .{proxy} ++ invocation_args);
+                            break :b @call(.auto, impl_func, .{proxy} ++ invocation_args);
                         }
                         // invocation with self
                         else if (@typeInfo(Arg0Type) == .Pointer)
-                            @call(.{}, impl_func, .{self.impl.?} ++ invocation_args)
+                            @call(.auto, impl_func, .{self.impl.?} ++ invocation_args)
                         else
-                            @call(.{}, impl_func, .{self.impl.?.*} ++ invocation_args);
+                            @call(.auto, impl_func, .{self.impl.?.*} ++ invocation_args);
                     } else @compileError("Parameter mismatch for " ++ function_name);
 
                     try self.writer.writeByte(@enumToInt(CommandId.response));
@@ -408,18 +408,18 @@ fn invocationResult(comptime T: type, value: T) InvocationResult(T) {
 fn validateSpec(comptime funcs: anytype) void {
     const T = @TypeOf(funcs);
     inline for (std.meta.fields(T)) |fld| {
-        if (fld.field_type != type)
+        if (fld.type != type)
             @compileError("All fields of .host or .client must be function types!");
         const field_info = @typeInfo(@field(funcs, fld.name));
 
         if (field_info != .Fn)
             @compileError("All fields of .host or .client must be function types!");
 
-        const func_info: std.builtin.TypeInfo.Fn = field_info.Fn;
+        const func_info: std.builtin.Type.Fn = field_info.Fn;
         if (func_info.is_generic) @compileError("Cannot handle generic functions");
-        for (func_info.args) |arg| {
-            if (arg.is_generic) @compileError("Cannot handle generic functions");
-            if (arg.arg_type == null) @compileError("Cannot handle generic functions");
+        for (func_info.params) |param| {
+            if (param.is_generic) @compileError("Cannot handle generic functions");
+            if (param.type == null) @compileError("Cannot handle generic functions");
         }
         if (func_info.return_type == null) @compileError("Cannot handle generic functions");
     }
