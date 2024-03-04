@@ -68,7 +68,7 @@ fn hostImplementation(file: std.fs.File) !void {
         }
 
         pub fn createCounter(self: *Self) CreateError!u32 {
-            const index = @truncate(u32, self.counters.items.len);
+            const index : u32 = @truncate(self.counters.items.len);
             try self.counters.append(0);
             return index;
         }
