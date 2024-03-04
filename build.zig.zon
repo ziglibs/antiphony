@@ -1,0 +1,17 @@
+.{
+    .name = "antiphony",
+    .version = "0.0.0",
+    .dependencies = .{
+        .s2s = .{
+            .url = "https://github.com/ziglibs/s2s/archive/b30205d5e9204899fb6d0fdf28d00ed4d18fe9c9.tar.gz",
+            .hash = "12202c39c98f05041f1052c268132669dbfcda87e4dbb0353cd84a6070924c8ac0e3",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        //"LICENSE",
+        //"README.md",
+    },
+}

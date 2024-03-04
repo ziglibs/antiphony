@@ -71,7 +71,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
             const max_received_func_name_len = comptime blk: {
                 var len = 0;
                 for (std.meta.fields(InboundSpec)) |fld| {
-                    len = std.math.max(fld.name.len, len);
+                    len = @max(fld.name.len, len);
                 }
                 break :blk len;
             };
@@ -134,7 +134,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                 /// Must be called only after a successful call to `connect()`.
                 pub fn shutdown(self: *EndPoint) IoError!void {
                     std.debug.assert(self.impl != null); // call these only after a successful connection!
-                    try self.writer.writeByte(@enumToInt(CommandId.shutdown));
+                    try self.writer.writeByte(@intFromEnum(CommandId.shutdown));
                 }
 
                 /// Waits for incoming calls and handles them till the client shuts down the connection.
@@ -215,9 +215,9 @@ pub fn CreateDefinition(comptime spec: anytype) type {
 
                     const sequence_id = self.nextSequenceID();
 
-                    try self.writer.writeByte(@enumToInt(CommandId.call));
-                    try self.writer.writeIntLittle(u32, @enumToInt(sequence_id));
-                    try self.writer.writeIntLittle(u32, func_name.len);
+                    try self.writer.writeByte(@intFromEnum(CommandId.call));
+                    try self.writer.writeInt(u32, @intFromEnum(sequence_id), .little);
+                    try self.writer.writeInt(u32, func_name.len, .little);
                     try self.writer.writeAll(func_name);
                     try s2s.serialize(self.writer, ArgsTuple, arg_list);
 
@@ -271,7 +271,7 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                                 try self.processCall();
                             },
                             .response => {
-                                const seq = @intToEnum(SequenceID, try self.reader.readIntLittle(u32));
+                                const seq = @as(SequenceID,@enumFromInt(try self.reader.readInt(u32, .little)));
                                 if (seq != sequence_id)
                                     return error.ProtocolViolation;
                                 return;
@@ -283,8 +283,8 @@ pub fn CreateDefinition(comptime spec: anytype) type {
 
                 /// Deserializes call information
                 fn processCall(self: *EndPoint) !void {
-                    const sequence_id = @intToEnum(SequenceID, try self.reader.readIntLittle(u32));
-                    const name_length = try self.reader.readIntLittle(u32);
+                    const sequence_id = @as(SequenceID,@enumFromInt(try self.reader.readInt(u32, .little)));
+                    const name_length = try self.reader.readInt(u32, .little);
                     if (name_length > max_received_func_name_len)
                         return error.ProtocolViolation;
                     var name_buffer: [max_received_func_name_len]u8 = undefined;
@@ -351,15 +351,15 @@ pub fn CreateDefinition(comptime spec: anytype) type {
                             @call(.auto, impl_func, .{self.impl.?.*} ++ invocation_args);
                     } else @compileError("Parameter mismatch for " ++ function_name);
 
-                    try self.writer.writeByte(@enumToInt(CommandId.response));
-                    try self.writer.writeIntLittle(u32, @enumToInt(sequence_id));
+                    try self.writer.writeByte(@intFromEnum(CommandId.response));
+                    try self.writer.writeInt(u32, @intFromEnum(sequence_id), .little);
                     try s2s.serialize(self.writer, InvocationResult(SpecReturnType), invocationResult(SpecReturnType, result));
                 }
 
                 fn nextSequenceID(self: *EndPoint) SequenceID {
                     const next = self.sequence_id;
                     self.sequence_id += 1;
-                    return @intToEnum(SequenceID, next);
+                    return @as(SequenceID, @enumFromInt(next));
                 }
             };
         }
@@ -464,8 +464,8 @@ test "invoke function (emulated host)" {
         try writer.writeAll(&protocol_magic);
         try writer.writeByte(current_version);
 
-        try writer.writeByte(@enumToInt(CommandId.response));
-        try writer.writeIntLittle(u32, 0); // first sequence id
+        try writer.writeByte(@intFromEnum(CommandId.response));
+        try writer.writeInt(u32, 0, .little); // first sequence id
 
         try s2s.serialize(writer, InvocationResult(void), invocationResult(void, {}));
 
@@ -497,7 +497,7 @@ test "invoke function (emulated client, no self parameter)" {
     const HostImpl = struct {
         fn some(a: u32, b: f32, c: []const u8) u32 {
             std.debug.print("some({}, {d}, \"{s}\");\n", .{ a, b, c });
-            return a + @floatToInt(u32, b);
+            return a + @as(u32,@intFromFloat(b));
         }
     };
 
@@ -512,9 +512,9 @@ test "invoke function (emulated client, no self parameter)" {
         try writer.writeAll(&protocol_magic);
         try writer.writeByte(current_version);
 
-        try writer.writeByte(@enumToInt(CommandId.call));
-        try writer.writeIntLittle(u32, 1337); // first sequence id
-        try writer.writeIntLittle(u32, "some".len);
+        try writer.writeByte(@intFromEnum(CommandId.call));
+        try writer.writeInt(u32, 1337, .little); // first sequence id
+        try writer.writeInt(u32, "some".len, .little);
         try writer.writeAll("some");
 
         try s2s.serialize(writer, std.meta.Tuple(&.{ u32, f32, []const u8 }), .{
@@ -523,7 +523,7 @@ test "invoke function (emulated client, no self parameter)" {
             .@"2" = "Hello, Host!",
         });
 
-        try writer.writeByte(@enumToInt(CommandId.shutdown));
+        try writer.writeByte(@intFromEnum(CommandId.shutdown));
 
         break :blk stream.getWritten();
     };
@@ -555,7 +555,7 @@ test "invoke function (emulated client, with self parameter)" {
 
         fn some(self: @This(), a: u32, b: f32, c: []const u8) u32 {
             std.debug.print("some({}, {}, {d}, \"{s}\");\n", .{ self.dummy, a, b, c });
-            return a + @floatToInt(u32, b);
+            return a + @as(u32,@intFromFloat(b));
         }
     };
 
@@ -570,9 +570,9 @@ test "invoke function (emulated client, with self parameter)" {
         try writer.writeAll(&protocol_magic);
         try writer.writeByte(current_version);
 
-        try writer.writeByte(@enumToInt(CommandId.call));
-        try writer.writeIntLittle(u32, 1337); // first sequence id
-        try writer.writeIntLittle(u32, "some".len);
+        try writer.writeByte(@intFromEnum(CommandId.call));
+        try writer.writeInt(u32, 1337, .little); // first sequence id
+        try writer.writeInt(u32, "some".len, .little);
         try writer.writeAll("some");
 
         try s2s.serialize(writer, std.meta.Tuple(&.{ u32, f32, []const u8 }), .{
@@ -581,7 +581,7 @@ test "invoke function (emulated client, with self parameter)" {
             .@"2" = "Hello, Host!",
         });
 
-        try writer.writeByte(@enumToInt(CommandId.shutdown));
+        try writer.writeByte(@intFromEnum(CommandId.shutdown));
 
         break :blk stream.getWritten();
     };
@@ -627,17 +627,17 @@ test "invoke function with callback (emulated host, no self parameter)" {
         try writer.writeAll(&protocol_magic);
         try writer.writeByte(current_version);
 
-        try writer.writeByte(@enumToInt(CommandId.call));
-        try writer.writeIntLittle(u32, 1337); // first sequence id
-        try writer.writeIntLittle(u32, "callback".len);
+        try writer.writeByte(@intFromEnum(CommandId.call));
+        try writer.writeInt(u32, 1337, .little); // first sequence id
+        try writer.writeInt(u32, "callback".len, .little);
         try writer.writeAll("callback");
 
         try s2s.serialize(writer, std.meta.Tuple(&.{[]const u8}), .{
             .@"0" = "Hello, World!",
         });
 
-        try writer.writeByte(@enumToInt(CommandId.response));
-        try writer.writeIntLittle(u32, 0); // first sequence id
+        try writer.writeByte(@intFromEnum(CommandId.response));
+        try writer.writeInt(u32, 0, .little); // first sequence id
 
         try s2s.serialize(writer, InvocationResult(void), invocationResult(void, {}));
 
@@ -687,17 +687,17 @@ test "invoke function with callback (emulated host, with self parameter)" {
         try writer.writeAll(&protocol_magic);
         try writer.writeByte(current_version);
 
-        try writer.writeByte(@enumToInt(CommandId.call));
-        try writer.writeIntLittle(u32, 1337); // first sequence id
-        try writer.writeIntLittle(u32, "callback".len);
+        try writer.writeByte(@intFromEnum(CommandId.call));
+        try writer.writeInt(u32, 1337, .little); // first sequence id
+        try writer.writeInt(u32, "callback".len, .little);
         try writer.writeAll("callback");
 
         try s2s.serialize(writer, std.meta.Tuple(&.{[]const u8}), .{
             .@"0" = "Hello, World!",
         });
 
-        try writer.writeByte(@enumToInt(CommandId.response));
-        try writer.writeIntLittle(u32, 0); // first sequence id
+        try writer.writeByte(@intFromEnum(CommandId.response));
+        try writer.writeInt(u32, 0, .little); // first sequence id
 
         try s2s.serialize(writer, InvocationResult(void), invocationResult(void, {}));
 
